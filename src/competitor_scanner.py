@@ -1,8 +1,10 @@
 """
 Competitor price scanner for Norwegian e-commerce products.
 
-Scrapes finn.no/shop and Google Shopping Norway to track competitor
-pricing and compare against our own product economics.
+Three sources:
+  1. DuckDuckGo organic  — finds webshops ranking for the same keyword
+  2. Prisjakt.no         — Norwegian price comparison aggregator
+  3. AliExpress via DDG  — estimates market sourcing price
 """
 
 import csv
@@ -15,6 +17,7 @@ from urllib.parse import quote_plus
 
 import requests
 from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS
 
 
 # ------------------------------------------------------------------ #
@@ -36,11 +39,10 @@ USER_AGENTS = [
     "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
 ]
 
-CSV_PATH = "data/competitor_data.csv"
-
 CSV_COLUMNS = [
-    "timestamp", "keyword", "seller", "price_nok", "url",
-    "our_price", "our_margin", "price_difference", "we_are_cheaper",
+    "timestamp", "keyword", "source", "title", "url",
+    "price_nok", "snippet", "our_price", "our_margin",
+    "price_difference", "we_are_cheaper",
 ]
 
 RETRY_ATTEMPTS = 3
@@ -53,13 +55,13 @@ RETRY_DELAY    = 2   # sekunder mellom forsøk
 
 class CompetitorScanner:
     """
-    Scan competitor prices from finn.no and Google Shopping Norway.
+    Scan competitor prices from DuckDuckGo organic, Prisjakt.no, and AliExpress.
 
-    Compares competitor prices against our own product economics and
-    appends all findings to a CSV file for historical price tracking.
+    Compares results against our own product economics, logs everything to
+    a date-based CSV file, and prints a Norwegian market positioning summary.
 
     Usage:
-        >>> scanner = CompetitorScanner("juicer bærbar", our_price=349, our_margin=0.684)
+        >>> scanner = CompetitorScanner("elektrisk juicemaskin bærbar", 349, 0.684)
         >>> results = scanner.scan()
         >>> summary = scanner.get_summary()
     """
@@ -78,17 +80,34 @@ class CompetitorScanner:
         self.our_price  = our_price
         self.our_margin = our_margin
 
-        # Opprett data-mappe hvis den ikke finnes ennå
+        # Opprett data-mappe og dagens CSV-fil
         os.makedirs("data", exist_ok=True)
-
-        # Skriv CSV-header hvis filen er ny
-        if not os.path.exists(CSV_PATH):
-            with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-                writer.writeheader()
+        self._ensure_csv_exists()
 
     # ---------------------------------------------------------------- #
-    #  HTTP-hjelper                                                      #
+    #  CSV-sti (datobasert)                                             #
+    # ---------------------------------------------------------------- #
+
+    @property
+    def csv_path(self) -> str:
+        """
+        Return today's CSV path.
+
+        En ny fil per dag gir naturlig historisk struktur:
+            data/competitor_scan_2026-02-22.csv
+            data/competitor_scan_2026-03-01.csv
+        """
+        date = datetime.now().strftime("%Y-%m-%d")
+        return f"data/competitor_scan_{date}.csv"
+
+    def _ensure_csv_exists(self) -> None:
+        """Opprett CSV med kolonneoverskrifter hvis filen ikke finnes ennå."""
+        if not os.path.exists(self.csv_path):
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+                csv.DictWriter(f, fieldnames=CSV_COLUMNS).writeheader()
+
+    # ---------------------------------------------------------------- #
+    #  HTTP-hjelper (brukt av Prisjakt-scraperen)                       #
     # ---------------------------------------------------------------- #
 
     def _get_headers(self) -> dict:
@@ -96,9 +115,6 @@ class CompetitorScanner:
         Build HTTP request headers with a randomly chosen user-agent.
 
         Roterer brukeragenter for å redusere sjansen for blokkering.
-
-        Returns:
-            dict: HTTP headers
         """
         return {
             "User-Agent":      random.choice(USER_AGENTS),
@@ -113,8 +129,7 @@ class CompetitorScanner:
         Fetch a URL with retry logic and return parsed HTML.
 
         Prøver RETRY_ATTEMPTS ganger ved nettverksfeil.
-        Returnerer None — krasjer aldri — slik at en blokkert kilde
-        ikke stopper scanning fra andre kilder.
+        Returnerer None ved blokkering eller vedvarende feil.
 
         Args:
             url: Full URL to fetch (str)
@@ -130,7 +145,6 @@ class CompetitorScanner:
                     timeout=10,
                 )
 
-                # Blokkert av nettstedet
                 if response.status_code in (403, 429):
                     print(f"  [BLOKKERT] {url} — HTTP {response.status_code}")
                     return None
@@ -172,22 +186,18 @@ class CompetitorScanner:
         if not price_text:
             return None
 
-        # Behold bare sifre, komma og punktum
         cleaned = re.sub(r"[^\d.,]", "", price_text)
 
         if not cleaned:
             return None
 
-        # Norsk format: 1.299,00 → fjern tusenskilletegn, konverter desimalkomma
         if "," in cleaned and "." in cleaned:
             cleaned = cleaned.replace(".", "").replace(",", ".")
         elif "," in cleaned:
             parts = cleaned.split(",")
-            # Desimalkomma: "349,00" → to desimaler etter komma
             if len(parts) == 2 and len(parts[1]) <= 2:
                 cleaned = cleaned.replace(",", ".")
             else:
-                # Tusenskilletegn: "1,299" → fjern komma
                 cleaned = cleaned.replace(",", "")
         elif "." in cleaned:
             parts = cleaned.split(".")
@@ -201,153 +211,205 @@ class CompetitorScanner:
         except ValueError:
             return None
 
-    # ---------------------------------------------------------------- #
-    #  Scraping                                                          #
-    # ---------------------------------------------------------------- #
-
-    def _scrape_finn(self) -> list[dict]:
+    def _extract_price_from_text(self, text: str) -> float | None:
         """
-        Scrape product listings from finn.no/shop.
+        Try to extract a price from free-text snippets.
 
-        Finn.no er Norges største markedsplass og gir relevant
-        prisdata for norske forbrukere.
+        Brukes på DuckDuckGo-snippets der prisen ikke er strukturert HTML.
+        Støtter norske kr-priser og USD/EUR (omregnes til estimert NOK).
+
+        Args:
+            text: Free text that may contain a price (str)
 
         Returns:
-            list of dicts with keys: seller, price_nok, url
+            float NOK price estimate, or None
         """
-        results  = []
-        encoded  = quote_plus(self.keyword)
-        url      = f"https://www.finn.no/shop/search.html?q={encoded}"
+        if not text:
+            return None
 
-        soup = self._fetch(url)
-        if soup is None:
-            print("  [FINN] Ingen data hentet")
-            return results
+        # Norsk format: "349 kr" eller "kr 349"
+        match = re.search(
+            r'(?:kr\.?\s*)([\d\s.,]+)|(?:([\d\s.,]+)\s*kr)',
+            text, re.IGNORECASE
+        )
+        if match:
+            raw = (match.group(1) or match.group(2) or "").strip()
+            price = self._parse_price_nok(raw)
+            if price and price > 0:
+                return price
 
-        # finn.no bruker <article>-elementer for produktkort
-        articles = soup.find_all("article")
-
-        # Fallback: søk etter div med produktrelaterte klasser
-        if not articles:
-            articles = soup.find_all(
-                "div",
-                class_=lambda c: c and "product" in c.lower(),
-            )
-
-        for article in articles[:10]:
+        # USD/EUR fra AliExpress-snippets — grov omregning ×10 → NOK
+        match = re.search(r'(?:US\$|USD|\$|€|EUR)\s*([\d.,]+)', text, re.IGNORECASE)
+        if match:
             try:
-                # Produktnavn / selger
-                name_tag = (
-                    article.find("h2") or
-                    article.find("h3") or
-                    article.find(class_=lambda c: c and "title" in str(c).lower())
-                )
-                seller = name_tag.get_text(strip=True) if name_tag else "Ukjent selger"
-                if len(seller) > 80:
-                    seller = seller[:77] + "..."
+                foreign = float(match.group(1).replace(",", "."))
+                return round(foreign * 10, 2)  # estimert NOK-pris
+            except ValueError:
+                pass
 
-                # Pris
-                price_tag = article.find(
-                    class_=lambda c: c and "price" in str(c).lower()
-                )
-                if price_tag:
-                    price_nok = self._parse_price_nok(price_tag.get_text(strip=True))
-                else:
-                    # Fallback: søk etter "kr" i teksten
-                    raw = article.get_text()
-                    match = re.search(r"[\d\s.,]+\s*kr", raw, re.IGNORECASE)
-                    price_nok = self._parse_price_nok(match.group(0)) if match else None
+        return None
 
-                # URL til produktsiden
-                link_tag    = article.find("a", href=True)
-                product_url = link_tag["href"] if link_tag else url
-                if product_url.startswith("/"):
-                    product_url = "https://www.finn.no" + product_url
+    # ---------------------------------------------------------------- #
+    #  DuckDuckGo-hjelper                                               #
+    # ---------------------------------------------------------------- #
 
-                if price_nok and price_nok > 0:
-                    results.append({
-                        "seller":    seller,
-                        "price_nok": price_nok,
-                        "url":       product_url,
-                    })
+    def _search_duckduckgo(self, query: str, max_results: int = 10) -> list[dict]:
+        """
+        Search DuckDuckGo and return structured results.
 
-            except Exception:
-                # Én ugyldig artikkel stopper ikke hele scanningen
-                continue
+        DuckDuckGo fungerer uten CAPTCHA og API-nøkkel — perfekt for
+        organisk konkurrentscanning uten å bli blokkert.
 
-        print(f"  [FINN] Fant {len(results)} resultater")
+        Args:
+            query:       Search query (str)
+            max_results: Maximum number of results to return (int)
+
+        Returns:
+            list of dicts with keys: title, url, snippet
+        """
+        try:
+            raw = DDGS().text(query, max_results=max_results)
+            return [
+                {
+                    "title":   item.get("title", ""),
+                    "url":     item.get("href", ""),
+                    "snippet": item.get("body", ""),
+                }
+                for item in (raw or [])
+            ]
+        except Exception as e:
+            print(f"  [DDG] Feil under søk: {e}")
+            return []
+
+    # ---------------------------------------------------------------- #
+    #  Scraping — tre kilder                                             #
+    # ---------------------------------------------------------------- #
+
+    def _search_google_organic(self) -> list[dict]:
+        """
+        Find competing webshops via DuckDuckGo organic search.
+
+        Organiske søkeresultater viser hvilke Shopify-butikker og nettbutikker
+        som ranker på samme søkeord som oss — direkte konkurrenter for SEO og ads.
+
+        Returns:
+            list of dicts with keys: source, title, url, price_nok, snippet
+        """
+        print("  [GOOGLE/DDG] Søker organiske konkurrenter...")
+        items   = self._search_duckduckgo(self.keyword, max_results=10)
+        results = []
+
+        for item in items:
+            results.append({
+                "source":    "google",
+                "title":     item["title"],
+                "url":       item["url"],
+                "price_nok": self._extract_price_from_text(item["snippet"]),
+                "snippet":   item["snippet"],
+            })
+
+        print(f"  [GOOGLE/DDG] {len(results)} resultater")
         return results
 
-    def _scrape_google_shopping(self) -> list[dict]:
+    def _scrape_prisjakt(self) -> list[dict]:
         """
-        Scrape product listings from Google Shopping Norway.
+        Scrape product listings from prisjakt.no.
 
-        Bruker Google Shopping (tbm=shop) med norsk lokalisering (hl=no&gl=no).
-        Google blokkerer scraping aggressivt — returnerer tom liste ved CAPTCHA.
+        Prisjakt er Norges største prissammenligningstjeneste og gir
+        de mest pålitelige norske konkurranseprisene.
 
         Returns:
-            list of dicts with keys: seller, price_nok, url
+            list of dicts with keys: source, title, url, price_nok, snippet
         """
         results = []
         encoded = quote_plus(self.keyword)
-        url     = f"https://www.google.no/search?q={encoded}&tbm=shop&hl=no&gl=no"
+        url     = f"https://www.prisjakt.no/search.php?search={encoded}"
 
         soup = self._fetch(url)
         if soup is None:
-            print("  [GOOGLE] Ingen data hentet")
+            print("  [PRISJAKT] Ingen data hentet")
             return results
 
-        # Google sender CAPTCHA ved mistenkt bot-trafikk
-        page_text = soup.get_text().lower()
-        if soup.find(id="recaptcha") or "unusual traffic" in page_text:
-            print("  [GOOGLE] CAPTCHA-svar mottatt — blokkert")
-            return results
-
-        # Google Shopping bruker gridresultat-divs
-        product_divs = (
-            soup.find_all("div", class_="sh-dgr__grid-result") or
-            soup.find_all("div", attrs={"data-sh-or": True}) or
-            soup.find_all("div", class_="g")
+        # Prisjakt bruker liste-elementer for produktkort
+        products = (
+            soup.find_all("li",  class_=lambda c: c and "product" in c.lower()) or
+            soup.find_all("div", class_=lambda c: c and "product" in c.lower()) or
+            soup.find_all("article")
         )
 
-        for div in product_divs[:10]:
+        for product in products[:10]:
             try:
                 # Produktnavn
                 name_tag = (
-                    div.find("h3") or
-                    div.find("h4") or
-                    div.find(class_=lambda c: c and "title" in str(c).lower())
+                    product.find("h2") or
+                    product.find("h3") or
+                    product.find(class_=lambda c: c and "name" in str(c).lower())
                 )
-                seller = name_tag.get_text(strip=True) if name_tag else "Ukjent selger"
-                if len(seller) > 80:
-                    seller = seller[:77] + "..."
+                title = name_tag.get_text(strip=True) if name_tag else "Ukjent produkt"
+                if len(title) > 80:
+                    title = title[:77] + "..."
 
                 # Pris
-                price_tag = div.find(
+                price_tag = product.find(
                     class_=lambda c: c and "price" in str(c).lower()
                 )
-                if price_tag:
-                    price_nok = self._parse_price_nok(price_tag.get_text(strip=True))
-                else:
-                    raw   = div.get_text()
-                    match = re.search(r"[\d\s.,]+\s*kr", raw, re.IGNORECASE)
+                raw_text  = price_tag.get_text(strip=True) if price_tag else product.get_text()
+                price_nok = self._parse_price_nok(raw_text)
+
+                # Fallback: søk etter kr-mønster i all tekst
+                if not price_nok:
+                    all_text = product.get_text()
+                    match    = re.search(r"[\d\s.,]+\s*kr", all_text, re.IGNORECASE)
                     price_nok = self._parse_price_nok(match.group(0)) if match else None
 
                 # URL
-                link_tag    = div.find("a", href=True)
+                link_tag    = product.find("a", href=True)
                 product_url = link_tag["href"] if link_tag else url
+                if product_url.startswith("/"):
+                    product_url = "https://www.prisjakt.no" + product_url
+
+                snippet = product.get_text(separator=" ", strip=True)[:200]
 
                 if price_nok and price_nok > 0:
                     results.append({
-                        "seller":    seller,
-                        "price_nok": price_nok,
+                        "source":    "prisjakt",
+                        "title":     title,
                         "url":       product_url,
+                        "price_nok": price_nok,
+                        "snippet":   snippet,
                     })
 
             except Exception:
                 continue
 
-        print(f"  [GOOGLE] Fant {len(results)} resultater")
+        print(f"  [PRISJAKT] {len(results)} resultater")
+        return results
+
+    def _search_aliexpress(self) -> list[dict]:
+        """
+        Estimate market sourcing price via DuckDuckGo + AliExpress.
+
+        Søker DuckDuckGo med site:aliexpress.com for å finne leverandørpriser.
+        USD-priser i snippets omregnes til estimert NOK (×10).
+
+        Returns:
+            list of dicts with keys: source, title, url, price_nok, snippet
+        """
+        print("  [ALIEXPRESS] Søker sourcing-pris via DDG...")
+        query   = f'"{self.keyword}" site:aliexpress.com'
+        items   = self._search_duckduckgo(query, max_results=3)
+        results = []
+
+        for item in items:
+            results.append({
+                "source":    "aliexpress",
+                "title":     item["title"],
+                "url":       item["url"],
+                "price_nok": self._extract_price_from_text(item["snippet"]),
+                "snippet":   item["snippet"],
+            })
+
+        print(f"  [ALIEXPRESS] {len(results)} resultater")
         return results
 
     # ---------------------------------------------------------------- #
@@ -356,38 +418,43 @@ class CompetitorScanner:
 
     def _build_row(self, result: dict) -> dict:
         """
-        Build a CSV row dict from a scraped product result.
+        Build a CSV row dict from a scraped result.
 
-        Beregner prisforskjell og posisjonering mot egne priser.
+        Beregner prisforskjell og posisjonering hvis prisen er kjent.
+        Setter price_difference og we_are_cheaper til None når pris mangler.
 
         Args:
-            result: Dict with keys seller, price_nok, url
+            result: Dict with keys source, title, url, price_nok, snippet
 
         Returns:
             dict matching CSV_COLUMNS schema
         """
-        price_nok        = result["price_nok"]
-        price_difference = round(self.our_price - price_nok, 2)
-        we_are_cheaper   = self.our_price < price_nok
+        price_nok = result.get("price_nok")
+
+        if price_nok is not None:
+            price_difference = round(self.our_price - price_nok, 2)
+            we_are_cheaper   = self.our_price < price_nok
+        else:
+            price_difference = None
+            we_are_cheaper   = None
 
         return {
             "timestamp":        datetime.now().isoformat(timespec="seconds"),
             "keyword":          self.keyword,
-            "seller":           result.get("seller", "Ukjent"),
-            "price_nok":        price_nok,
+            "source":           result.get("source", "unknown"),
+            "title":            result.get("title", "")[:80],
             "url":              result.get("url", ""),
+            "price_nok":        price_nok,
+            "snippet":          result.get("snippet", "")[:200],
             "our_price":        self.our_price,
-            "our_margin":       round(self.our_margin * 100, 1),  # lagres som %-tall
+            "our_margin":       round(self.our_margin * 100, 1),
             "price_difference": price_difference,
             "we_are_cheaper":   we_are_cheaper,
         }
 
     def _append_to_csv(self, rows: list[dict]) -> None:
         """
-        Append rows to the CSV file. Never overwrites existing data.
-
-        Historiske prisdata er verdifulle — vi legger alltid til,
-        sletter aldri. Lar deg se prisutviklingen over tid.
+        Append rows to today's CSV. Never overwrites existing data.
 
         Args:
             rows: List of row dicts matching CSV_COLUMNS
@@ -395,9 +462,67 @@ class CompetitorScanner:
         if not rows:
             return
 
-        with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-            writer.writerows(rows)
+        self._ensure_csv_exists()
+        with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+            csv.DictWriter(f, fieldnames=CSV_COLUMNS).writerows(rows)
+
+    # ---------------------------------------------------------------- #
+    #  Analyse-utskrift                                                  #
+    # ---------------------------------------------------------------- #
+
+    def _print_analysis(self, results: list[dict]) -> None:
+        """
+        Print a market positioning summary after scan.
+
+        Skiller norske priser (google + prisjakt) fra AliExpress-estimater
+        og gir en enkel konklusjon om vår prisposisjonering.
+
+        Args:
+            results: List of row dicts from scan()
+        """
+        no_prices  = [
+            r["price_nok"] for r in results
+            if r.get("source") in ("google", "prisjakt") and r.get("price_nok")
+        ]
+        ali_prices = [
+            r["price_nok"] for r in results
+            if r.get("source") == "aliexpress" and r.get("price_nok")
+        ]
+
+        print("\n" + "=" * 56)
+        print("  KONKURRENTANALYSE")
+        print("=" * 56)
+
+        avg_no = None
+        if no_prices:
+            avg_no = sum(no_prices) / len(no_prices)
+            print(f"  Laveste norske pris:   {min(no_prices):>8.0f} NOK")
+            print(f"  Høyeste norske pris:   {max(no_prices):>8.0f} NOK")
+            print(f"  Snitt norsk pris:      {avg_no:>8.0f} NOK")
+        else:
+            print("  Ingen norske priser funnet")
+
+        if ali_prices:
+            avg_ali = sum(ali_prices) / len(ali_prices)
+            print(f"  Est. AliExpress pris:  {avg_ali:>8.0f} NOK  (USD×10, estimat)")
+        else:
+            print("  Ingen AliExpress-priser funnet")
+
+        print(f"  Vår pris:              {self.our_price:>8.0f} NOK")
+
+        if avg_no:
+            diff = self.our_price - avg_no
+            if diff < -30:
+                conclusion = "VI ER BILLIGST"
+            elif diff > 30:
+                conclusion = "VI ER DYREST"
+            else:
+                conclusion = "VI ER PÅ SNITT"
+            retning = "billigere" if diff < 0 else "dyrere"
+            print(f"\n  KONKLUSJON: {conclusion}")
+            print(f"  (vi er {abs(diff):.0f} NOK {retning} enn snitt-konkurrent)")
+
+        print("=" * 56)
 
     # ---------------------------------------------------------------- #
     #  Offentlige metoder                                                #
@@ -405,10 +530,14 @@ class CompetitorScanner:
 
     def scan(self) -> list[dict]:
         """
-        Run full competitor scan across all sources.
+        Run full competitor scan across all three sources.
 
-        Scraper finn.no og Google Shopping, lagrer alle funn til CSV,
-        og returnerer listen med konkurransedata.
+        Kjører:
+          1. DuckDuckGo organisk (Google-konkurrenter)
+          2. Prisjakt.no (norske prisdata)
+          3. AliExpress via DDG (sourcing-estimat)
+
+        Lagrer alle funn til today's CSV og printer analyse.
 
         Returns:
             list of dicts — same schema as CSV_COLUMNS
@@ -418,54 +547,52 @@ class CompetitorScanner:
 
         all_results = []
 
-        # Kilde 1: finn.no
-        for item in self._scrape_finn():
+        # Kilde 1: Google organisk via DuckDuckGo
+        for item in self._search_google_organic():
             all_results.append(self._build_row(item))
 
-        # Liten pause mellom kildene — høflig mot serverne
         time.sleep(1)
 
-        # Kilde 2: Google Shopping
-        for item in self._scrape_google_shopping():
+        # Kilde 2: Prisjakt.no
+        for item in self._scrape_prisjakt():
+            all_results.append(self._build_row(item))
+
+        time.sleep(1)
+
+        # Kilde 3: AliExpress via DuckDuckGo
+        for item in self._search_aliexpress():
             all_results.append(self._build_row(item))
 
         # Lagre til CSV (append-only)
         self._append_to_csv(all_results)
 
-        print(f"\nTotalt: {len(all_results)} konkurrenter funnet")
-        if all_results:
-            prices = [r["price_nok"] for r in all_results]
-            print(f"Prisintervall: {min(prices):.0f} – {max(prices):.0f} NOK")
+        with_price = [r for r in all_results if r["price_nok"] is not None]
+        print(f"\nTotalt: {len(all_results)} resultater ({len(with_price)} med pris)")
+
+        self._print_analysis(all_results)
 
         return all_results
 
     def get_summary(self) -> dict:
         """
-        Compute a positioning summary from the most recent scan.
+        Compute a positioning summary from today's scan data.
 
-        Leser CSV-filen og returnerer aggregert statistikk for den
-        siste scannebølgen. Inkluderer hva vår margin ville vært
-        om vi hadde priset oss på konkurrentens gjennomsnittspris.
+        Leser dagens CSV og returnerer aggregert statistikk.
+        Skiller norske priser fra AliExpress-estimater.
 
         Returns:
             dict with keys:
-                - keyword:                Our search keyword
-                - our_price:              Our sale price (NOK)
-                - competitor_count:       Number of competitors in latest scan
-                - min_price:              Cheapest competitor (NOK)
-                - max_price:              Most expensive competitor (NOK)
-                - avg_price:              Average competitor price (NOK)
-                - cheaper_than_us:        Count of competitors cheaper than us
-                - more_expensive_than_us: Count of competitors more expensive
-                - we_are_cheapest:        True if our price beats all competitors
-                - margin_at_avg_price:    Our margin % if we matched avg price
+                - keyword, our_price, competitor_count
+                - min_price, max_price, avg_price
+                - cheaper_than_us, more_expensive_than_us, we_are_cheapest
+                - margin_at_avg_price, positioning
+                - aliexpress_avg_price (optional, only if data found)
         """
-        if not os.path.exists(CSV_PATH):
+        if not os.path.exists(self.csv_path):
             return {"error": "Ingen data — kjør scan() først"}
 
-        # Les alle rader for dette søkeordet
         rows = []
-        with open(CSV_PATH, "r", encoding="utf-8") as f:
+        with open(self.csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 if row["keyword"] == self.keyword:
@@ -474,33 +601,54 @@ class CompetitorScanner:
         if not rows:
             return {"error": f"Ingen data for '{self.keyword}' — kjør scan() først"}
 
-        # Hent kun den siste scannerunden (nyeste timestamp)
+        # Hent kun siste scannerunde (nyeste timestamp)
         last_ts = max(r["timestamp"] for r in rows)
         latest  = [r for r in rows if r["timestamp"] == last_ts]
 
-        prices = [float(r["price_nok"]) for r in latest]
-        if not prices:
-            return {"error": "Ingen gyldige priser i siste scan"}
+        no_prices = [
+            float(r["price_nok"]) for r in latest
+            if r.get("source") in ("google", "prisjakt") and r.get("price_nok")
+        ]
+        ali_prices = [
+            float(r["price_nok"]) for r in latest
+            if r.get("source") == "aliexpress" and r.get("price_nok")
+        ]
 
-        avg_price = sum(prices) / len(prices)
+        if not no_prices:
+            return {"error": "Ingen gyldige norske priser i siste scan"}
 
-        # Hva ville vår margin vært om vi matchet gjennomsnittsprisen?
-        # Våre kostnader = our_price × (1 - our_margin)
-        our_costs           = self.our_price * (1 - self.our_margin)
-        margin_at_avg_price = (avg_price - our_costs) / avg_price if avg_price > 0 else 0.0
+        avg_price   = sum(no_prices) / len(no_prices)
+        our_costs   = self.our_price * (1 - self.our_margin)
+        margin_at_avg = (avg_price - our_costs) / avg_price if avg_price > 0 else 0.0
 
-        cheaper_than_us = sum(1 for p in prices if p < self.our_price)
-        more_expensive  = sum(1 for p in prices if p >= self.our_price)
+        cheaper_than_us = sum(1 for p in no_prices if p < self.our_price)
+        more_expensive  = sum(1 for p in no_prices if p >= self.our_price)
 
-        return {
+        diff = self.our_price - avg_price
+        if diff < -30:
+            positioning = "VI ER BILLIGST"
+        elif diff > 30:
+            positioning = "VI ER DYREST"
+        else:
+            positioning = "VI ER PÅ SNITT"
+
+        summary = {
             "keyword":                self.keyword,
             "our_price":              self.our_price,
-            "competitor_count":       len(prices),
-            "min_price":              round(min(prices), 2),
-            "max_price":              round(max(prices), 2),
+            "competitor_count":       len(no_prices),
+            "min_price":              round(min(no_prices), 2),
+            "max_price":              round(max(no_prices), 2),
             "avg_price":              round(avg_price, 2),
             "cheaper_than_us":        cheaper_than_us,
             "more_expensive_than_us": more_expensive,
-            "we_are_cheapest":        self.our_price <= min(prices),
-            "margin_at_avg_price":    round(margin_at_avg_price * 100, 1),
+            "we_are_cheapest":        self.our_price <= min(no_prices),
+            "margin_at_avg_price":    round(margin_at_avg * 100, 1),
+            "positioning":            positioning,
         }
+
+        if ali_prices:
+            summary["aliexpress_avg_price"] = round(
+                sum(ali_prices) / len(ali_prices), 2
+            )
+
+        return summary

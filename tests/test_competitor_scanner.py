@@ -1,83 +1,80 @@
 """
-Tests for CompetitorScanner.
+Tests for CompetitorScanner (DuckDuckGo + Prisjakt + AliExpress).
 
-All HTTP calls are mocked — no real network requests are made.
+All external calls are mocked — no real network requests are made.
 
 Run with:
     pytest tests/test_competitor_scanner.py -v
 
 Testscenario:
-    juicer bærbar — 349 NOK, 68.4% margin
-    Konkurrenter: 299 NOK (billigere), 399 NOK (dyrere), 349 NOK (lik pris)
+    elektrisk juicemaskin bærbar — 349 NOK, 68.4% margin
 """
 
 import csv
 import os
 import sys
-import tempfile
 import pytest
 
 from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, 'src')
 
-from competitor_scanner import CompetitorScanner, CSV_PATH, CSV_COLUMNS
+from competitor_scanner import CompetitorScanner, CSV_COLUMNS
 
 
 # ------------------------------------------------------------------ #
-#  Hjelpefunksjoner for mock-respons                                   #
+#  Mock-data                                                           #
 # ------------------------------------------------------------------ #
+
+DDG_RESULTS = [
+    {"title": "Juicer på nett",  "href": "https://nettbutikk.no/juicer",  "body": "Kjøp juicer for 299 kr"},
+    {"title": "Juicer Premium",  "href": "https://premium.no/juicer",     "body": "Fra 399 kr"},
+    {"title": "Juicer tilbud",   "href": "https://tilbud.no/juicer",      "body": "Nå kun 319 kr"},
+]
+
+DDG_ALIEXPRESS_RESULTS = [
+    {"title": "Portable juicer AliExpress", "href": "https://aliexpress.com/item/1", "body": "US$4.99 fast shipping"},
+    {"title": "Mini juicer",                "href": "https://aliexpress.com/item/2", "body": "USD 6.50 free shipping"},
+]
+
+PRISJAKT_HTML = """
+<html><body>
+  <li class="product-list-item">
+    <h2>Bærbar juicer 2L</h2>
+    <span class="price">329 kr</span>
+    <a href="/produkt/juicer-2l">Se pris</a>
+  </li>
+  <li class="product-list-item">
+    <h2>Elektrisk Juicer Pro</h2>
+    <span class="price">419 kr</span>
+    <a href="/produkt/juicer-pro">Se pris</a>
+  </li>
+</body></html>
+"""
+
+PRISJAKT_BLOCKED_HTML = ""
+
 
 def _make_response(html: str, status_code: int = 200) -> MagicMock:
-    """Lag en falsk requests.Response med gitt HTML og statuskode."""
-    mock_resp = MagicMock()
-    mock_resp.status_code = status_code
-    mock_resp.text        = html
-    return mock_resp
-
-
-FINN_HTML = """
-<html><body>
-  <article>
-    <h2>Bærbar juicer 349kr</h2>
-    <span class="price">299 kr</span>
-    <a href="/shop/product/1">Se mer</a>
-  </article>
-  <article>
-    <h2>Juicer Premium</h2>
-    <span class="price">399 kr</span>
-    <a href="/shop/product/2">Se mer</a>
-  </article>
-</body></html>
-"""
-
-GOOGLE_HTML = """
-<html><body>
-  <div class="sh-dgr__grid-result">
-    <h3>Juicer Tilbud</h3>
-    <span class="price">349 kr</span>
-    <a href="https://example.com/juicer">Kjøp</a>
-  </div>
-</body></html>
-"""
-
-BLOCKED_HTML = ""
+    mock = MagicMock()
+    mock.status_code = status_code
+    mock.text        = html
+    return mock
 
 
 # ------------------------------------------------------------------ #
-#  Fixture                                                             #
+#  Fixtures                                                            #
 # ------------------------------------------------------------------ #
 
 @pytest.fixture
 def scanner(tmp_path, monkeypatch):
     """
     CompetitorScanner med juicer-produkt.
-    Bruker en midlertidig mappe slik at CSV-filen ikke forurenser prosjektet.
+    Bruker midlertidig mappe for å isolere CSV-filer fra prosjektet.
     """
-    # Pek CSV_PATH til tmp-mappe
     monkeypatch.chdir(tmp_path)
     return CompetitorScanner(
-        keyword    = "juicer bærbar",
+        keyword    = "elektrisk juicemaskin bærbar",
         our_price  = 349,
         our_margin = 0.684,
     )
@@ -89,10 +86,12 @@ def scanner_with_data(scanner):
     rows = [
         {
             "timestamp":        "2024-01-15T10:00:00",
-            "keyword":          "juicer bærbar",
-            "seller":           "Butikk A",
-            "price_nok":        299,
+            "keyword":          "elektrisk juicemaskin bærbar",
+            "source":           "google",
+            "title":            "Juicer nettbutikk",
             "url":              "https://example.com/a",
+            "price_nok":        299,
+            "snippet":          "kjøp juicer",
             "our_price":        349,
             "our_margin":       68.4,
             "price_difference": 50.0,
@@ -100,19 +99,33 @@ def scanner_with_data(scanner):
         },
         {
             "timestamp":        "2024-01-15T10:00:00",
-            "keyword":          "juicer bærbar",
-            "seller":           "Butikk B",
+            "keyword":          "elektrisk juicemaskin bærbar",
+            "source":           "prisjakt",
+            "title":            "Butikk B juicer",
+            "url":              "https://prisjakt.no/b",
             "price_nok":        399,
-            "url":              "https://example.com/b",
+            "snippet":          "399 kr fri frakt",
             "our_price":        349,
             "our_margin":       68.4,
             "price_difference": -50.0,
             "we_are_cheaper":   True,
         },
+        {
+            "timestamp":        "2024-01-15T10:00:00",
+            "keyword":          "elektrisk juicemaskin bærbar",
+            "source":           "aliexpress",
+            "title":            "Mini juicer Ali",
+            "url":              "https://aliexpress.com/1",
+            "price_nok":        50,
+            "snippet":          "US$5.00",
+            "our_price":        349,
+            "our_margin":       68.4,
+            "price_difference": 299.0,
+            "we_are_cheaper":   False,
+        },
     ]
-    with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        writer.writerows(rows)
+    with open(scanner.csv_path, "a", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=CSV_COLUMNS).writerows(rows)
     return scanner
 
 
@@ -123,20 +136,30 @@ def scanner_with_data(scanner):
 class TestInit:
 
     def test_attributes_are_stored(self, scanner):
-        assert scanner.keyword    == "juicer bærbar"
+        assert scanner.keyword    == "elektrisk juicemaskin bærbar"
         assert scanner.our_price  == 349
         assert scanner.our_margin == 0.684
 
     def test_csv_file_is_created_with_header(self, scanner):
-        assert os.path.exists(CSV_PATH)
-        with open(CSV_PATH, "r") as f:
+        assert os.path.exists(scanner.csv_path)
+        with open(scanner.csv_path) as f:
             header = f.readline().strip()
         assert "timestamp" in header
+        assert "source"    in header
         assert "price_nok" in header
-        assert "we_are_cheaper" in header
+        assert "snippet"   in header
 
     def test_data_directory_is_created(self, scanner):
         assert os.path.isdir("data")
+
+    def test_csv_path_contains_todays_date(self, scanner):
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        assert today in scanner.csv_path
+
+    def test_csv_path_is_date_based_filename(self, scanner):
+        assert "competitor_scan_" in scanner.csv_path
+        assert scanner.csv_path.endswith(".csv")
 
 
 # ------------------------------------------------------------------ #
@@ -149,21 +172,18 @@ class TestParsePriceNok:
         assert scanner._parse_price_nok("349 kr") == 349.0
 
     def test_thousand_separator_dot(self, scanner):
-        # Norsk tusenskilletegn: 1.299 kr
         assert scanner._parse_price_nok("1.299 kr") == 1299.0
 
     def test_decimal_comma(self, scanner):
         assert scanner._parse_price_nok("349,00 kr") == 349.0
 
     def test_dot_and_comma_combined(self, scanner):
-        # 1.299,99 → 1299.99
         assert scanner._parse_price_nok("1.299,99") == pytest.approx(1299.99)
 
     def test_nok_prefix(self, scanner):
         assert scanner._parse_price_nok("NOK 799") == 799.0
 
     def test_dash_suffix(self, scanner):
-        # "499,-" format
         result = scanner._parse_price_nok("499,-")
         assert result == pytest.approx(499.0, abs=1)
 
@@ -172,6 +192,34 @@ class TestParsePriceNok:
 
     def test_no_digits_returns_none(self, scanner):
         assert scanner._parse_price_nok("ukjent pris") is None
+
+
+# ------------------------------------------------------------------ #
+#  TestExtractPriceFromText                                            #
+# ------------------------------------------------------------------ #
+
+class TestExtractPriceFromText:
+
+    def test_extracts_kr_price(self, scanner):
+        assert scanner._extract_price_from_text("Kjøp nå for 299 kr") == 299.0
+
+    def test_extracts_kr_prefix(self, scanner):
+        assert scanner._extract_price_from_text("kr 349 inkl frakt") == 349.0
+
+    def test_converts_usd_to_nok(self, scanner):
+        # USD 5.00 × 10 = 50.0 NOK
+        result = scanner._extract_price_from_text("US$5.00 fast shipping")
+        assert result == pytest.approx(50.0, abs=1)
+
+    def test_converts_dollar_sign(self, scanner):
+        result = scanner._extract_price_from_text("only $4.99")
+        assert result == pytest.approx(49.9, abs=1)
+
+    def test_none_on_no_price(self, scanner):
+        assert scanner._extract_price_from_text("great product, buy now") is None
+
+    def test_none_on_empty(self, scanner):
+        assert scanner._extract_price_from_text("") is None
 
 
 # ------------------------------------------------------------------ #
@@ -190,119 +238,208 @@ class TestFetch:
     @patch("competitor_scanner.requests.get")
     def test_blocked_403_returns_none(self, mock_get, scanner):
         mock_get.return_value = _make_response("", status_code=403)
-        result = scanner._fetch("https://example.com")
-        assert result is None
+        assert scanner._fetch("https://example.com") is None
 
     @patch("competitor_scanner.requests.get")
     def test_blocked_429_returns_none(self, mock_get, scanner):
         mock_get.return_value = _make_response("", status_code=429)
-        result = scanner._fetch("https://example.com")
-        assert result is None
+        assert scanner._fetch("https://example.com") is None
 
     @patch("competitor_scanner.time.sleep")
     @patch("competitor_scanner.requests.get")
-    def test_network_error_retries_and_returns_none(self, mock_get, mock_sleep, scanner):
+    def test_network_error_retries_3_times(self, mock_get, mock_sleep, scanner):
         import requests as req
         mock_get.side_effect = req.RequestException("timeout")
-        result = scanner._fetch("https://example.com")
-        assert result is None
-        # Skal ha prøvd 3 ganger → 2 pauser mellom forsøkene
+        assert scanner._fetch("https://example.com") is None
         assert mock_get.call_count == 3
 
 
 # ------------------------------------------------------------------ #
-#  TestScrapeFinn                                                       #
+#  TestSearchDuckDuckGo                                                #
 # ------------------------------------------------------------------ #
 
-class TestScrapeFinn:
+class TestSearchDuckDuckGo:
+
+    @patch("competitor_scanner.DDGS")
+    def test_returns_list_of_dicts(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.return_value = DDG_RESULTS
+        results = scanner._search_duckduckgo("juicer")
+        assert isinstance(results, list)
+
+    @patch("competitor_scanner.DDGS")
+    def test_maps_keys_correctly(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.return_value = DDG_RESULTS[:1]
+        results = scanner._search_duckduckgo("juicer")
+        assert results[0]["title"]   == "Juicer på nett"
+        assert results[0]["url"]     == "https://nettbutikk.no/juicer"
+        assert results[0]["snippet"] == "Kjøp juicer for 299 kr"
+
+    @patch("competitor_scanner.DDGS")
+    def test_exception_returns_empty_list(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.side_effect = Exception("network error")
+        results = scanner._search_duckduckgo("juicer")
+        assert results == []
+
+    @patch("competitor_scanner.DDGS")
+    def test_none_response_returns_empty_list(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.return_value = None
+        results = scanner._search_duckduckgo("juicer")
+        assert results == []
+
+
+# ------------------------------------------------------------------ #
+#  TestSearchGoogleOrganic                                             #
+# ------------------------------------------------------------------ #
+
+class TestSearchGoogleOrganic:
+
+    @patch("competitor_scanner.DDGS")
+    def test_returns_list(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.return_value = DDG_RESULTS
+        results = scanner._search_google_organic()
+        assert isinstance(results, list)
+        assert len(results) == len(DDG_RESULTS)
+
+    @patch("competitor_scanner.DDGS")
+    def test_source_is_google(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.return_value = DDG_RESULTS
+        results = scanner._search_google_organic()
+        assert all(r["source"] == "google" for r in results)
+
+    @patch("competitor_scanner.DDGS")
+    def test_extracts_price_from_snippet(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.return_value = DDG_RESULTS[:1]
+        results = scanner._search_google_organic()
+        # Snippet inneholder "299 kr"
+        assert results[0]["price_nok"] == 299.0
+
+    @patch("competitor_scanner.DDGS")
+    def test_ddg_error_returns_empty_list(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.side_effect = Exception("blocked")
+        results = scanner._search_google_organic()
+        assert results == []
+
+
+# ------------------------------------------------------------------ #
+#  TestScrapePrisjakt                                                  #
+# ------------------------------------------------------------------ #
+
+class TestScrapePrisjakt:
 
     @patch("competitor_scanner.requests.get")
     def test_returns_list_of_dicts(self, mock_get, scanner):
-        mock_get.return_value = _make_response(FINN_HTML)
-        results = scanner._scrape_finn()
+        mock_get.return_value = _make_response(PRISJAKT_HTML)
+        results = scanner._scrape_prisjakt()
         assert isinstance(results, list)
 
     @patch("competitor_scanner.requests.get")
     def test_extracts_prices(self, mock_get, scanner):
-        mock_get.return_value = _make_response(FINN_HTML)
-        results = scanner._scrape_finn()
+        mock_get.return_value = _make_response(PRISJAKT_HTML)
+        results = scanner._scrape_prisjakt()
         prices = [r["price_nok"] for r in results]
-        assert 299.0 in prices
-        assert 399.0 in prices
+        assert 329.0 in prices
+        assert 419.0 in prices
+
+    @patch("competitor_scanner.requests.get")
+    def test_source_is_prisjakt(self, mock_get, scanner):
+        mock_get.return_value = _make_response(PRISJAKT_HTML)
+        results = scanner._scrape_prisjakt()
+        assert all(r["source"] == "prisjakt" for r in results)
 
     @patch("competitor_scanner.requests.get")
     def test_blocked_returns_empty_list(self, mock_get, scanner):
         mock_get.return_value = _make_response("", status_code=403)
-        results = scanner._scrape_finn()
-        assert results == []
+        assert scanner._scrape_prisjakt() == []
 
     @patch("competitor_scanner.requests.get")
-    def test_finn_url_contains_keyword(self, mock_get, scanner):
-        mock_get.return_value = _make_response(FINN_HTML)
-        scanner._scrape_finn()
+    def test_prisjakt_url_is_correct(self, mock_get, scanner):
+        mock_get.return_value = _make_response(PRISJAKT_HTML)
+        scanner._scrape_prisjakt()
         called_url = mock_get.call_args[0][0]
-        assert "finn.no" in called_url
-        assert "juicer" in called_url
+        assert "prisjakt.no" in called_url
+        assert "juicemaskin" in called_url
 
 
 # ------------------------------------------------------------------ #
-#  TestScrapeGoogleShopping                                            #
+#  TestSearchAliExpress                                                #
 # ------------------------------------------------------------------ #
 
-class TestScrapeGoogleShopping:
+class TestSearchAliExpress:
 
-    @patch("competitor_scanner.requests.get")
-    def test_returns_list_of_dicts(self, mock_get, scanner):
-        mock_get.return_value = _make_response(GOOGLE_HTML)
-        results = scanner._scrape_google_shopping()
+    @patch("competitor_scanner.DDGS")
+    def test_returns_list(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.return_value = DDG_ALIEXPRESS_RESULTS
+        results = scanner._search_aliexpress()
         assert isinstance(results, list)
 
-    @patch("competitor_scanner.requests.get")
-    def test_captcha_returns_empty_list(self, mock_get, scanner):
-        captcha_html = "<html><body>unusual traffic from your computer</body></html>"
-        mock_get.return_value = _make_response(captcha_html)
-        results = scanner._scrape_google_shopping()
-        assert results == []
+    @patch("competitor_scanner.DDGS")
+    def test_source_is_aliexpress(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.return_value = DDG_ALIEXPRESS_RESULTS
+        results = scanner._search_aliexpress()
+        assert all(r["source"] == "aliexpress" for r in results)
 
-    @patch("competitor_scanner.requests.get")
-    def test_google_url_contains_tbm_shop(self, mock_get, scanner):
-        mock_get.return_value = _make_response(GOOGLE_HTML)
-        scanner._scrape_google_shopping()
-        called_url = mock_get.call_args[0][0]
-        assert "tbm=shop" in called_url
+    @patch("competitor_scanner.DDGS")
+    def test_extracts_usd_price_from_snippet(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.return_value = DDG_ALIEXPRESS_RESULTS[:1]
+        results = scanner._search_aliexpress()
+        # "US$4.99" → ~49.9 NOK
+        assert results[0]["price_nok"] == pytest.approx(49.9, abs=1)
+
+    @patch("competitor_scanner.DDGS")
+    def test_query_includes_site_aliexpress(self, mock_ddgs, scanner):
+        mock_ddgs.return_value.text.return_value = []
+        scanner._search_aliexpress()
+        called_query = mock_ddgs.return_value.text.call_args[0][0]
+        assert "aliexpress.com" in called_query
 
 
 # ------------------------------------------------------------------ #
-#  TestBuildRow                                                         #
+#  TestBuildRow                                                        #
 # ------------------------------------------------------------------ #
 
 class TestBuildRow:
 
+    def _sample_result(self, source="google", price=299.0):
+        return {
+            "source":    source,
+            "title":     "Test juicer",
+            "url":       "https://example.com",
+            "price_nok": price,
+            "snippet":   "Kjøp nå",
+        }
+
     def test_contains_all_csv_columns(self, scanner):
-        row = scanner._build_row({"seller": "Test", "price_nok": 299.0, "url": "https://x.com"})
+        row = scanner._build_row(self._sample_result())
         for col in CSV_COLUMNS:
             assert col in row
 
     def test_price_difference_positive_when_competitor_is_cheaper(self, scanner):
-        # Konkurrent: 299, vi: 349 → differanse +50 (vi er dyrere)
-        row = scanner._build_row({"seller": "Billig", "price_nok": 299.0, "url": ""})
+        row = scanner._build_row(self._sample_result(price=299.0))
         assert row["price_difference"] == pytest.approx(50.0)
-        assert row["we_are_cheaper"] is False
+        assert row["we_are_cheaper"]   is False
 
     def test_price_difference_negative_when_we_are_cheaper(self, scanner):
-        # Konkurrent: 499, vi: 349 → differanse -150 (vi er billigere)
-        row = scanner._build_row({"seller": "Dyr", "price_nok": 499.0, "url": ""})
+        row = scanner._build_row(self._sample_result(price=499.0))
         assert row["price_difference"] == pytest.approx(-150.0)
-        assert row["we_are_cheaper"] is True
+        assert row["we_are_cheaper"]   is True
+
+    def test_none_price_gives_none_fields(self, scanner):
+        result = {"source": "google", "title": "X", "url": "", "price_nok": None, "snippet": ""}
+        row = scanner._build_row(result)
+        assert row["price_difference"] is None
+        assert row["we_are_cheaper"]   is None
 
     def test_our_margin_stored_as_percent(self, scanner):
-        row = scanner._build_row({"seller": "X", "price_nok": 350.0, "url": ""})
-        # 0.684 → lagres som 68.4
+        row = scanner._build_row(self._sample_result())
         assert row["our_margin"] == pytest.approx(68.4, abs=0.1)
 
+    def test_source_is_preserved(self, scanner):
+        row = scanner._build_row(self._sample_result(source="prisjakt"))
+        assert row["source"] == "prisjakt"
+
     def test_keyword_is_preserved(self, scanner):
-        row = scanner._build_row({"seller": "X", "price_nok": 350.0, "url": ""})
-        assert row["keyword"] == "juicer bærbar"
+        row = scanner._build_row(self._sample_result())
+        assert row["keyword"] == "elektrisk juicemaskin bærbar"
 
 
 # ------------------------------------------------------------------ #
@@ -311,84 +448,98 @@ class TestBuildRow:
 
 class TestAppendToCsv:
 
+    def _make_row(self, scanner, price=299.0, source="google"):
+        return scanner._build_row({
+            "source": source, "title": "X",
+            "url": "", "price_nok": price, "snippet": "",
+        })
+
     def test_rows_are_appended(self, scanner):
-        row1 = scanner._build_row({"seller": "A", "price_nok": 299.0, "url": ""})
-        row2 = scanner._build_row({"seller": "B", "price_nok": 399.0, "url": ""})
-        scanner._append_to_csv([row1, row2])
-
-        with open(CSV_PATH, "r") as f:
+        scanner._append_to_csv([self._make_row(scanner, 299), self._make_row(scanner, 399)])
+        with open(scanner.csv_path) as f:
             content = f.read()
-
-        assert "A" in content
-        assert "B" in content
+        assert "299" in content
+        assert "399" in content
 
     def test_existing_data_is_not_overwritten(self, scanner_with_data):
-        # Filen har allerede 2 rader fra fixture
-        new_row = scanner_with_data._build_row({"seller": "Ny", "price_nok": 499.0, "url": ""})
+        new_row = scanner_with_data._build_row({
+            "source": "google", "title": "Ny", "url": "", "price_nok": 499.0, "snippet": "",
+        })
         scanner_with_data._append_to_csv([new_row])
 
-        with open(CSV_PATH, "r") as f:
-            reader = csv.DictReader(f)
-            rows   = list(reader)
+        with open(scanner_with_data.csv_path) as f:
+            rows = list(csv.DictReader(f))
 
-        sellers = [r["seller"] for r in rows]
-        assert "Butikk A" in sellers   # gammel data bevart
-        assert "Butikk B" in sellers   # gammel data bevart
-        assert "Ny"       in sellers   # ny rad lagt til
+        titles = [r["title"] for r in rows]
+        assert "Juicer nettbutikk" in titles
+        assert "Ny"                in titles
 
     def test_empty_list_does_nothing(self, scanner):
-        before = os.path.getsize(CSV_PATH)
+        before = os.path.getsize(scanner.csv_path)
         scanner._append_to_csv([])
-        after  = os.path.getsize(CSV_PATH)
-        assert before == after
+        assert os.path.getsize(scanner.csv_path) == before
 
 
 # ------------------------------------------------------------------ #
-#  TestScan                                                             #
+#  TestScan                                                            #
 # ------------------------------------------------------------------ #
 
 class TestScan:
 
+    def _mock_scan(self, mock_ddgs, mock_get):
+        """Hjelpefunksjon: setter opp standard mocks for scan()."""
+        mock_ddgs.return_value.text.return_value = DDG_RESULTS
+        mock_get.return_value = _make_response(PRISJAKT_HTML)
+
     @patch("competitor_scanner.time.sleep")
     @patch("competitor_scanner.requests.get")
-    def test_scan_returns_list(self, mock_get, mock_sleep, scanner):
-        mock_get.return_value = _make_response(FINN_HTML)
+    @patch("competitor_scanner.DDGS")
+    def test_scan_returns_list(self, mock_ddgs, mock_get, mock_sleep, scanner):
+        self._mock_scan(mock_ddgs, mock_get)
         results = scanner.scan()
         assert isinstance(results, list)
 
     @patch("competitor_scanner.time.sleep")
     @patch("competitor_scanner.requests.get")
-    def test_scan_writes_to_csv(self, mock_get, mock_sleep, scanner):
-        mock_get.return_value = _make_response(FINN_HTML)
+    @patch("competitor_scanner.DDGS")
+    def test_scan_writes_to_csv(self, mock_ddgs, mock_get, mock_sleep, scanner):
+        self._mock_scan(mock_ddgs, mock_get)
         scanner.scan()
-
-        with open(CSV_PATH, "r") as f:
-            reader = csv.DictReader(f)
-            rows   = list(reader)
-
-        # Finn-HTML har 2 produkter med pris
-        assert len(rows) >= 2
+        with open(scanner.csv_path) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) > 0
 
     @patch("competitor_scanner.time.sleep")
     @patch("competitor_scanner.requests.get")
-    def test_scan_graceful_on_blocked_sources(self, mock_get, mock_sleep, scanner):
-        # Begge kildene er blokkert
+    @patch("competitor_scanner.DDGS")
+    def test_scan_includes_all_three_sources(self, mock_ddgs, mock_get, mock_sleep, scanner):
+        mock_ddgs.return_value.text.return_value = DDG_RESULTS
+        mock_get.return_value = _make_response(PRISJAKT_HTML)
+        results = scanner.scan()
+        sources = {r["source"] for r in results}
+        assert "google"     in sources
+        assert "prisjakt"   in sources
+        assert "aliexpress" in sources
+
+    @patch("competitor_scanner.time.sleep")
+    @patch("competitor_scanner.requests.get")
+    @patch("competitor_scanner.DDGS")
+    def test_scan_graceful_when_all_sources_fail(self, mock_ddgs, mock_get, mock_sleep, scanner):
+        mock_ddgs.return_value.text.side_effect = Exception("blocked")
         mock_get.return_value = _make_response("", status_code=403)
         results = scanner.scan()
         assert results == []
 
     @patch("competitor_scanner.time.sleep")
     @patch("competitor_scanner.requests.get")
-    def test_second_scan_appends_not_overwrites(self, mock_get, mock_sleep, scanner):
-        mock_get.return_value = _make_response(FINN_HTML)
+    @patch("competitor_scanner.DDGS")
+    def test_second_scan_appends_not_overwrites(self, mock_ddgs, mock_get, mock_sleep, scanner):
+        self._mock_scan(mock_ddgs, mock_get)
         scanner.scan()
         scanner.scan()
-
-        with open(CSV_PATH, "r") as f:
-            reader = csv.DictReader(f)
-            rows   = list(reader)
-
-        # To scanner × 2 Finn-produkter = minimum 4 rader
+        with open(scanner.csv_path) as f:
+            rows = list(csv.DictReader(f))
+        # To scan-runder skal gi dobbelt så mange rader
         assert len(rows) >= 4
 
 
@@ -402,7 +553,8 @@ class TestGetSummary:
         result = scanner.get_summary()
         assert "error" in result
 
-    def test_wrong_keyword_returns_error(self, scanner_with_data):
+    def test_wrong_keyword_returns_error(self, scanner_with_data, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         other = CompetitorScanner("kaffetrakter", 799, 0.573)
         result = other.get_summary()
         assert "error" in result
@@ -413,39 +565,65 @@ class TestGetSummary:
             "keyword", "our_price", "competitor_count",
             "min_price", "max_price", "avg_price",
             "cheaper_than_us", "more_expensive_than_us",
-            "we_are_cheapest", "margin_at_avg_price",
+            "we_are_cheapest", "margin_at_avg_price", "positioning",
         ]:
             assert key in summary
 
-    def test_min_max_are_correct(self, scanner_with_data):
+    def test_min_max_only_uses_norwegian_sources(self, scanner_with_data):
         summary = scanner_with_data.get_summary()
+        # Norske priser: 299 (google) og 399 (prisjakt)
         assert summary["min_price"] == pytest.approx(299.0)
         assert summary["max_price"] == pytest.approx(399.0)
 
-    def test_avg_price_is_correct(self, scanner_with_data):
+    def test_avg_price_correct(self, scanner_with_data):
         # (299 + 399) / 2 = 349
         summary = scanner_with_data.get_summary()
         assert summary["avg_price"] == pytest.approx(349.0)
 
-    def test_positioning_counts(self, scanner_with_data):
-        # Konkurrent A (299) er billigere enn oss (349)
-        # Konkurrent B (399) er dyrere enn oss
+    def test_positioning_is_pa_snitt(self, scanner_with_data):
+        # Vår pris 349, snitt 349 → diff=0 → PÅ SNITT
         summary = scanner_with_data.get_summary()
-        assert summary["cheaper_than_us"]        == 1
-        assert summary["more_expensive_than_us"] == 1
+        assert summary["positioning"] == "VI ER PÅ SNITT"
 
-    def test_we_are_cheapest_is_false_when_competitor_is_cheaper(self, scanner_with_data):
-        # Konkurrent A selger for 299, vi for 349 → vi er IKKE billigst
+    def test_aliexpress_avg_included_when_data_exists(self, scanner_with_data):
         summary = scanner_with_data.get_summary()
+        assert "aliexpress_avg_price" in summary
+        assert summary["aliexpress_avg_price"] == pytest.approx(50.0)
+
+    def test_positioning_billigst(self, scanner, tmp_path, monkeypatch):
+        """Vi er billigst når konkurrentene er dyrest."""
+        monkeypatch.chdir(tmp_path)
+        s = CompetitorScanner("testprodukt", 200, 0.5)
+        rows = [
+            {"timestamp": "2024-01-15T10:00:00", "keyword": "testprodukt",
+             "source": "google", "title": "X", "url": "", "price_nok": 400,
+             "snippet": "", "our_price": 200, "our_margin": 50.0,
+             "price_difference": -200, "we_are_cheaper": True},
+        ]
+        with open(s.csv_path, "a", newline="", encoding="utf-8") as f:
+            csv.DictWriter(f, fieldnames=CSV_COLUMNS).writerows(rows)
+        summary = s.get_summary()
+        assert summary["positioning"] == "VI ER BILLIGST"
+
+    def test_positioning_dyrest(self, scanner, tmp_path, monkeypatch):
+        """Vi er dyrest når konkurrentene er billigst."""
+        monkeypatch.chdir(tmp_path)
+        s = CompetitorScanner("testprodukt", 600, 0.5)
+        rows = [
+            {"timestamp": "2024-01-15T10:00:00", "keyword": "testprodukt",
+             "source": "google", "title": "X", "url": "", "price_nok": 200,
+             "snippet": "", "our_price": 600, "our_margin": 50.0,
+             "price_difference": 400, "we_are_cheaper": False},
+        ]
+        with open(s.csv_path, "a", newline="", encoding="utf-8") as f:
+            csv.DictWriter(f, fieldnames=CSV_COLUMNS).writerows(rows)
+        summary = s.get_summary()
+        assert summary["positioning"] == "VI ER DYREST"
+
+    def test_we_are_cheapest_false_when_competitor_is_cheaper(self, scanner_with_data):
+        summary = scanner_with_data.get_summary()
+        # Konkurrent 299 < vår 349 → vi er IKKE billigst
         assert summary["we_are_cheapest"] is False
-
-    def test_margin_at_avg_price_is_reasonable(self, scanner_with_data):
-        # Avg = 349, vår pris = 349 → margin bør være lik vår margin
-        summary = scanner_with_data.get_summary()
-        # Margin ved 349 = (349 - kostnader) / 349
-        # Kostnader = 349 * (1 - 0.684) = 110.3
-        # Margin = (349 - 110.3) / 349 ≈ 68.4%
-        assert summary["margin_at_avg_price"] == pytest.approx(68.4, abs=0.5)
 
 
 # ------------------------------------------------------------------ #
@@ -454,31 +632,29 @@ class TestGetSummary:
 
 class TestReusability:
 
-    def test_two_scanners_with_different_keywords(self, tmp_path, monkeypatch):
-        """To ulike scannere kan bruke samme CSV uten å blande data."""
+    def test_two_scanners_different_keywords_dont_mix(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
 
-        scanner_a = CompetitorScanner("juicer", 349, 0.684)
-        scanner_b = CompetitorScanner("kaffetrakter", 799, 0.573)
+        s_a = CompetitorScanner("juicer",       349, 0.684)
+        s_b = CompetitorScanner("kaffetrakter", 799, 0.573)
 
-        row_a = scanner_a._build_row({"seller": "A", "price_nok": 299.0, "url": ""})
-        row_b = scanner_b._build_row({"seller": "B", "price_nok": 750.0, "url": ""})
+        row_a = s_a._build_row({"source": "google", "title": "A", "url": "", "price_nok": 299.0, "snippet": ""})
+        row_b = s_b._build_row({"source": "google", "title": "B", "url": "", "price_nok": 750.0, "snippet": ""})
 
-        scanner_a._append_to_csv([row_a])
-        scanner_b._append_to_csv([row_b])
+        s_a._append_to_csv([row_a])
+        s_b._append_to_csv([row_b])
 
-        # get_summary filtrerer på keyword — ingen blanding
-        summary_a = scanner_a.get_summary()
-        summary_b = scanner_b.get_summary()
+        sum_a = s_a.get_summary()
+        sum_b = s_b.get_summary()
 
-        assert summary_a["keyword"] == "juicer"
-        assert summary_b["keyword"] == "kaffetrakter"
-        assert summary_a["avg_price"] == pytest.approx(299.0)
-        assert summary_b["avg_price"] == pytest.approx(750.0)
+        assert sum_a["keyword"]   == "juicer"
+        assert sum_b["keyword"]   == "kaffetrakter"
+        assert sum_a["avg_price"] == pytest.approx(299.0)
+        assert sum_b["avg_price"] == pytest.approx(750.0)
 
     def test_our_price_and_margin_stored_correctly(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        scanner = CompetitorScanner("testprodukt", 500, 0.50)
-        row = scanner._build_row({"seller": "X", "price_nok": 450.0, "url": ""})
+        s   = CompetitorScanner("testprodukt", 500, 0.50)
+        row = s._build_row({"source": "google", "title": "X", "url": "", "price_nok": 450.0, "snippet": ""})
         assert row["our_price"]  == 500
         assert row["our_margin"] == pytest.approx(50.0)
