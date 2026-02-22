@@ -66,16 +66,16 @@ class CampaignSimulator:
     
     def predict(self, daily_budget, expected_cpa, days, cpa_cv=0.3):
         """
-        Run Montr Carlo simulation adn return prediction results
+        Run Monte Carlo simulation and return prediction results.
 
         Args:
-            daily_budget: Daglid ad spend (float, NOK)
+            daily_budget: Daglig ad spend (float, NOK)
             expected_cpa: Forventet CPA (float, NOK)
-            days:         Kampansjevarighet i dager (int)
-            cpa_cv:       Cpa-variabilitet, defualt 0.3 = 30% (float)
+            days:         Kampanjevarighet i dager (int)
+            cpa_cv:       CPA-variabilitet, default 0.3 = 30% (float)
 
         Returns:
-            Dict: Simuleringsresultater med sannsynelighetet og profit-prediksjon
+            dict: Simuleringsresultater med sannsynligheter og profit-prediksjon
         """
         # Beregn total budsjett for perioden
         total_budget = daily_budget * days

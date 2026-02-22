@@ -25,7 +25,7 @@ This project is designed as a skill-building framework for understanding e-comme
 
 ## Features
 
-### Break-Even Engine
+### Break-Even Engine (`src/break_even.py`)
 Core module for calculating fundamental profitability metrics:
 - Net profit before advertising spend
 - Profit margin percentage
@@ -34,84 +34,33 @@ Core module for calculating fundamental profitability metrics:
 
 The engine demonstrates that common industry benchmarks (such as "ROAS above 2.0 is good") are meaningless without context. A 2.0 ROAS can be highly profitable or a significant loss depending on product margin structure.
 
+### KPI Decision Engine (`src/kpi_engine.py`)
+Automated campaign evaluation with statistical confidence gating:
+- Two-layer decision logic: confidence gate → performance gate
+- Three confidence levels (LOW/MEDIUM/HIGH) based on sample size
+- Scale/Hold/Kill decisions with configurable buffer thresholds
+- CPA ratio normalization for product-agnostic evaluation
+
+### Campaign Simulator (`src/simulator.py`)
+Monte Carlo simulation for pre-deployment scenario planning:
+- Log-normal CPA sampling with configurable variability
+- 1000+ simulation runs per prediction
+- Probability distribution of Scale/Hold/Kill outcomes
+- Profit confidence intervals (p10, mean, p90)
+
 ### Interactive Analysis Notebooks
 Jupyter notebooks combining mathematical theory, implementation, and visualization:
-- **Break-Even Analysis** - Comprehensive walkthrough of margin sensitivity and threshold calculations
-- Full derivations of formulas with worked examples
-- Visual demonstrations of cost-profitability relationships
-
-### Planned Modules
-- **KPI Decision Engine** - Automated campaign evaluation logic with statistical significance testing
-- **Performance Simulator** - Monte Carlo scenario modeling for pre-deployment testing
+- **01 — Break-Even Analysis**: Margin sensitivity, threshold calculations, cost-profitability visualization
+- **02 — KPI Decision Engine**: Statistical confidence, decision zones, campaign lifecycle
+- **03 — Campaign Simulator**: Monte Carlo methodology, log-normal distributions, strategy comparison
 
 ---
 
 ## Installation
 
 **Requirements:**
-- Python 3.8 or higher
-- pip package manager
-
-**Setup:**
-```bash
-
-📝 SMART! La oss gjøre det mer profesjonelt!
-🔥 Ny README - Ren og profesjonell:
-markdown
-
-# Ecom Quant Lab
-
-**Quantitative decision intelligence framework for e-commerce performance analysis**
-
-A structured training lab for building data-driven decision-making skills in paid advertising and product economics. This project removes emotional decision-making from ad spend allocation through rigorous break-even analysis, margin sensitivity testing, and simulation-based scenario planning.
-
----
-
-## Purpose
-
-This project is designed as a skill-building framework for understanding e-commerce unit economics and ad performance analysis. It focuses on quantitative reasoning and structured decision-making rather than automation or shortcuts.
-
-**What this is:**
-- A framework for analytical thinking in e-commerce
-- A tool for understanding profitability fundamentals
-- A portfolio demonstration of quantitative reasoning
-- A training environment for capital allocation discipline
-
-**What this is not:**
-- An automation tool or bot
-- A marketing system
-- Financial advice software
-
----
-
-## Features
-
-### Break-Even Engine
-Core module for calculating fundamental profitability metrics:
-- Net profit before advertising spend
-- Profit margin percentage
-- Maximum sustainable Cost Per Acquisition (CPA)
-- Break-even Return On Ad Spend (ROAS)
-
-The engine demonstrates that common industry benchmarks (such as "ROAS above 2.0 is good") are meaningless without context. A 2.0 ROAS can be highly profitable or a significant loss depending on product margin structure.
-
-### Interactive Analysis Notebooks
-Jupyter notebooks combining mathematical theory, implementation, and visualization:
-- **Break-Even Analysis** - Comprehensive walkthrough of margin sensitivity and threshold calculations
-- Full derivations of formulas with worked examples
-- Visual demonstrations of cost-profitability relationships
-
-### Planned Modules
-- **KPI Decision Engine** - Automated campaign evaluation logic with statistical significance testing
-- **Performance Simulator** - Monte Carlo scenario modeling for pre-deployment testing
-
----
-
-## Installation
-
-**Requirements:**
-- Python 3.8 or higher
-- pip package manager
+- Python 3.8+
+- pip
 
 **Setup:**
 ```bash
@@ -128,11 +77,11 @@ pip install -r requirements.txt
 
 ## Usage
 
-### As a Python Module
+### Break-Even Analysis
 ```python
 from src.break_even import BreakEvenCalculator
 
-calculator = BreakEvenCalculator(
+calc = BreakEvenCalculator(
     sale_price=799,
     product_cost=250,
     shipping_cost=65,
@@ -140,56 +89,59 @@ calculator = BreakEvenCalculator(
     payment_fee_fixed=3
 )
 
-analysis = calculator.get_full_analysis()
-
-print(f"Net Profit: {analysis['net_profit']:.2f} NOK")
-print(f"Margin: {analysis['margin_percent']:.1f}%")
-print(f"Break-Even ROAS: {analysis['breakeven_roas']:.2f}")
+analysis = calc.get_full_analysis()
+print(f"Net Profit: {analysis['net_profit']:.2f} NOK")   # 457.83 NOK
+print(f"Margin: {analysis['margin_percent']:.1f}%")       # 57.3%
+print(f"Break-Even ROAS: {analysis['breakeven_roas']:.2f}") # 1.74
 ```
 
-**Output:**
+### Campaign Evaluation
+```python
+from src.kpi_engine import KPIDecisionEngine
+
+engine = KPIDecisionEngine(calc, min_conversions=10)
+engine.get_decision_report(spend=5000, conversions=25, revenue=12000)
+# → ✅ SCALE — CPA 56% below max with medium confidence
 ```
-Net Profit: 457.83 NOK
-Margin: 57.3%
-Break-Even ROAS: 1.74
+
+### Monte Carlo Simulation
+```python
+from src.simulator import CampaignSimulator
+
+sim = CampaignSimulator(engine, n_simulations=1000, random_seed=42)
+sim.get_prediction_report(daily_budget=500, expected_cpa=350, days=14)
+# → 80.7% SCALE probability, +3,056 NOK expected profit
 ```
 
 ### Interactive Exploration
 ```bash
-jupyter notebook notebooks/ecom_quant_lab.ipynb
+jupyter notebook notebooks/
 ```
-
-The notebook provides step-by-step explanations of each concept with executable code cells and visualizations.
 
 ---
 
 ## Core Concepts
 
-### Break-Even ROAS Calculation
-
-The minimum ROAS required to avoid losses:
+### Break-Even ROAS
 ```
-Break-Even ROAS = Sale Price / Maximum CPA
-                = Sale Price / Net Profit
-                = 1 / (Margin% / 100)
+Break-Even ROAS = Sale Price / Max CPA = 1 / (Margin% / 100)
+```
+- 57% margin → BE-ROAS 1.74 (easy to hit)
+- 30% margin → BE-ROAS 3.33 (much harder)
+
+### Two-Layer Decision Logic
+```
+Layer 1 — Confidence gate:
+  LOW confidence (<10 sales)  → always HOLD
+
+Layer 2 — Performance gate:
+  CPA ratio > 1.2 (kill_threshold)  → KILL
+  CPA ratio < 0.9 (scale_threshold) → SCALE
+  Everything else                    → HOLD
 ```
 
-**Example:**
-- Product with 57% margin: Break-even ROAS = 1.74
-- Product with 30% margin: Break-even ROAS = 3.33
-
-This demonstrates why industry-standard ROAS targets are unreliable without product-specific margin analysis.
-
-### Margin Sensitivity Analysis
-
-Small changes in cost structure create disproportionate effects on profitability thresholds:
-
-**Example scenario:**
-- Shipping cost increases by 20 NOK
-- Margin decreases by 2.5 percentage points
-- Break-even ROAS increases by 0.08
-
-This relationship highlights why cost control is critical for sustainable ad-driven growth.
+### Monte Carlo Prediction
+Run the campaign 1000× with randomized CPA to get probability distributions instead of single-point estimates.
 
 ---
 
@@ -197,14 +149,18 @@ This relationship highlights why cost control is critical for sustainable ad-dri
 ```
 ecom-quant-lab/
 ├── src/
-│   ├── break_even.py          # Profitability calculation engine
-│   ├── kpi_engine.py          # Decision logic (planned)
-│   └── simulator.py           # Scenario modeling (planned)
+│   ├── __init__.py
+│   ├── break_even.py       # Profitability calculation engine
+│   ├── kpi_engine.py       # Scale/Hold/Kill decision logic
+│   └── simulator.py        # Monte Carlo scenario modeling
 ├── notebooks/
-│   └── ecom_quant_lab.ipynb   # Educational analysis notebook
-├── tests/                     # Unit tests (planned)
-├── data/                      # Sample datasets
-├── requirements.txt           # Python dependencies
+│   ├── 01_break_even_analyse.ipynb
+│   ├── 02_kpi_decision_engine.ipynb
+│   └── 03_simulator.ipynb
+├── tests/
+│   ├── test_kpi_engine.py  # 34 tests
+│   └── test_simulator.py   # 17 tests
+├── requirements.txt
 └── README.md
 ```
 
@@ -212,66 +168,12 @@ ecom-quant-lab/
 
 ## Technical Stack
 
-- **Python 3.14** - Primary language
-- **NumPy** - Numerical operations
-- **Pandas** - Data manipulation
-- **Matplotlib** - Plotting and visualization
-- **Seaborn** - Statistical graphics
-- **Jupyter** - Interactive computing environment
-
----
-
-## Development Roadmap
-
-**Phase 1: Foundation** (Completed)
-- Break-even calculation engine
-- Pedagogical notebook with theory and examples
-- Margin sensitivity visualization
-
-**Phase 2: Decision Systems** (In Progress)
-- KPI evaluation framework
-- Statistical significance testing
-- Automated Scale/Hold/Kill logic
-
-**Phase 3: Simulation** (Planned)
-- Monte Carlo scenario generator
-- Risk analysis tools
-- Multi-variable sensitivity testing
-
----
-
-## Learning Objectives
-
-This project is structured as a progressive learning experience:
-
-**Week 1: Economic Fundamentals**
-- Understanding true profitability vs. revenue
-- Margin structure and sensitivity
-- CPA and ROAS relationship derivation
-
-**Week 2: Decision Framework**
-- Statistical significance in performance data
-- Threshold-based decision logic
-- Risk management through simulation
-
-The goal is to develop intuition for capital allocation in uncertain environments with limited sample sizes—a common challenge in early-stage ad campaigns.
-
----
-
-## Methodology
-
-All calculations use conservative assumptions:
-- Payment processing fees based on standard Stripe pricing (2.9% + fixed fee)
-- No assumption of economies of scale
-- No customer lifetime value modeling (single-transaction analysis)
-
-This approach provides worst-case scenario analysis. Any improvements in unit economics or repeat purchase behavior create upside margin of safety.
-
----
-
-## Contributing
-
-This is a personal educational project, but constructive feedback is welcome through GitHub issues.
+- **Python 3.14**
+- **NumPy** — Numerical operations & Monte Carlo sampling
+- **Pandas** — Data manipulation
+- **Matplotlib / Seaborn** — Visualization
+- **Jupyter** — Interactive notebooks
+- **pytest** — Testing (51 tests, all passing)
 
 ---
 
@@ -288,4 +190,3 @@ GitHub: [@Sanzino](https://github.com/Sanzino)
 ---
 
 **Built February 2026**
-
