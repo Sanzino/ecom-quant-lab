@@ -197,3 +197,57 @@ class BreakEvenCalculator:
             'max_cpa': max_cpa,
             'breakeven_roas': breakeven_roas
         }
+
+    def calculate_organic_profit(self, units_sold, fixed_monthly_cost=613):
+        """
+        Calculate monthly profit from organic (non-paid) sales after fixed costs.
+
+        Organic sales have no ad spend per unit — the only overhead is the
+        fixed monthly cost (Shopify, tools, domain). This method finds
+        how many units are needed to cover those fixed costs.
+
+        Args:
+            units_sold:         Number of organic units sold this month (int)
+            fixed_monthly_cost: Total fixed monthly overhead in NOK (float)
+                                Default: 613 NOK
+                                  - Shopify Basic: 400 NOK
+                                  - Creatify:      200 NOK
+                                  - Domain:         13 NOK
+
+        Returns:
+            dict: Organic profit analysis
+                - units_sold:          Input units sold
+                - net_profit_per_unit: Margin per sale before fixed costs (NOK)
+                - gross_profit:        Total margin before fixed costs (NOK)
+                - fixed_monthly_cost:  Fixed overhead (NOK)
+                - net_profit:          Actual profit after fixed costs (NOK)
+                - break_even_units:    Units needed to cover fixed costs (float)
+                - profitable:          True if net_profit > 0 (bool)
+
+        Example:
+            >>> calc = BreakEvenCalculator(349, 72, 25, 0.029, 3)
+            >>> result = calc.calculate_organic_profit(units_sold=3)
+            >>> result['profitable']
+            True
+        """
+        # Netto profit per enhet = marginen vår (samme som max_cpa)
+        net_profit_per_unit = self.calculate_net_profit()
+
+        # Brutto profit = antall solgte enheter × netto profit per enhet
+        gross_profit = units_sold * net_profit_per_unit
+
+        # Netto profit = brutto profit minus faste månedskostnader
+        net_profit = gross_profit - fixed_monthly_cost
+
+        # Break-even punkt: hvor mange enheter dekker de faste kostnadene?
+        break_even_units = fixed_monthly_cost / net_profit_per_unit
+
+        return {
+            'units_sold':          units_sold,
+            'net_profit_per_unit': round(net_profit_per_unit, 2),
+            'gross_profit':        round(gross_profit, 2),
+            'fixed_monthly_cost':  fixed_monthly_cost,
+            'net_profit':          round(net_profit, 2),
+            'break_even_units':    round(break_even_units, 2),
+            'profitable':          net_profit > 0
+        }
