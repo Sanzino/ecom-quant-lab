@@ -2,7 +2,7 @@
 
 **Quantitative decision intelligence framework for e-commerce performance analysis**
 
-A structured training lab for building data-driven decision-making skills in paid advertising and product economics. This project removes emotional decision-making from ad spend allocation through rigorous break-even analysis, margin sensitivity testing, and simulation-based scenario planning.
+A structured training lab for building data-driven decision-making skills in paid advertising and product economics. This project removes emotional decision-making from ad spend allocation through rigorous break-even analysis, margin sensitivity testing, simulation-based scenario planning, and competitive price intelligence.
 
 ---
 
@@ -31,6 +31,7 @@ Core module for calculating fundamental profitability metrics:
 - Profit margin percentage
 - Maximum sustainable Cost Per Acquisition (CPA)
 - Break-even Return On Ad Spend (ROAS)
+- Organic sales break-even analysis (fixed monthly costs vs. units sold)
 
 The engine demonstrates that common industry benchmarks (such as "ROAS above 2.0 is good") are meaningless without context. A 2.0 ROAS can be highly profitable or a significant loss depending on product margin structure.
 
@@ -48,11 +49,21 @@ Monte Carlo simulation for pre-deployment scenario planning:
 - Probability distribution of Scale/Hold/Kill outcomes
 - Profit confidence intervals (p10, mean, p90)
 
+### Competitor Scanner (`src/competitor_scanner.py`)
+Automated competitive price intelligence for Norwegian e-commerce:
+- Scrapes finn.no/shop and Google Shopping Norway (requests + BeautifulSoup)
+- 6 rotating user-agents with 3-retry logic and graceful failure on blocking
+- Norwegian price parser: handles `1.299,-`, `349,00`, `NOK 799` formats
+- Append-only CSV logging to `data/competitor_data.csv` for historical tracking
+- Pricing position analysis: how many competitors are cheaper vs. more expensive
+- Margin sensitivity at competitor average price
+
 ### Interactive Analysis Notebooks
 Jupyter notebooks combining mathematical theory, implementation, and visualization:
-- **01 — Break-Even Analysis**: Margin sensitivity, threshold calculations, cost-profitability visualization
+- **01 — Break-Even Analysis**: Margin sensitivity, threshold calculations, cost-profitability visualization, organic sales curve
 - **02 — KPI Decision Engine**: Statistical confidence, decision zones, campaign lifecycle
 - **03 — Campaign Simulator**: Monte Carlo methodology, log-normal distributions, strategy comparison
+- **04 — Competitor Analysis**: Price landscape, historical price tracking, margin sensitivity curves
 
 ---
 
@@ -90,9 +101,14 @@ calc = BreakEvenCalculator(
 )
 
 analysis = calc.get_full_analysis()
-print(f"Net Profit: {analysis['net_profit']:.2f} NOK")   # 457.83 NOK
-print(f"Margin: {analysis['margin_percent']:.1f}%")       # 57.3%
+print(f"Net Profit: {analysis['net_profit']:.2f} NOK")     # 457.83 NOK
+print(f"Margin: {analysis['margin_percent']:.1f}%")         # 57.3%
 print(f"Break-Even ROAS: {analysis['breakeven_roas']:.2f}") # 1.74
+
+# Organic sales — how many units to cover fixed monthly costs?
+result = calc.calculate_organic_profit(units_sold=3)
+print(f"Profitable: {result['profitable']}")          # True
+print(f"Break-even units: {result['break_even_units']}") # 2.57
 ```
 
 ### Campaign Evaluation
@@ -101,7 +117,7 @@ from src.kpi_engine import KPIDecisionEngine
 
 engine = KPIDecisionEngine(calc, min_conversions=10)
 engine.get_decision_report(spend=5000, conversions=25, revenue=12000)
-# → ✅ SCALE — CPA 56% below max with medium confidence
+# → SCALE — CPA 56% below max with medium confidence
 ```
 
 ### Monte Carlo Simulation
@@ -111,6 +127,27 @@ from src.simulator import CampaignSimulator
 sim = CampaignSimulator(engine, n_simulations=1000, random_seed=42)
 sim.get_prediction_report(daily_budget=500, expected_cpa=350, days=14)
 # → 80.7% SCALE probability, +3,056 NOK expected profit
+```
+
+### Competitor Price Scanning
+```python
+from src.competitor_scanner import CompetitorScanner
+
+scanner = CompetitorScanner(
+    keyword    = "juicer bærbar",
+    our_price  = 349,
+    our_margin = 0.684,
+)
+
+results = scanner.scan()           # scrapes finn.no + Google Shopping
+summary = scanner.get_summary()    # aggregated positioning report
+
+print(f"Competitors found: {summary['competitor_count']}")
+print(f"Cheapest:          {summary['min_price']} NOK")
+print(f"Avg competitor:    {summary['avg_price']} NOK")
+print(f"Cheaper than us:   {summary['cheaper_than_us']}")
+print(f"We are cheapest:   {summary['we_are_cheapest']}")
+print(f"Margin at avg:     {summary['margin_at_avg_price']}%")
 ```
 
 ### Interactive Exploration
@@ -141,7 +178,33 @@ Layer 2 — Performance gate:
 ```
 
 ### Monte Carlo Prediction
-Run the campaign 1000× with randomized CPA to get probability distributions instead of single-point estimates.
+Run the campaign 1000× with randomized CPA to get probability distributions instead of single-point estimates. Uses log-normal distribution — always positive, right-skewed, realistic for CPA variance.
+
+### Competitor Positioning
+```
+price_difference = our_price - competitor_price
+  → positive: competitor is cheaper than us
+  → negative: we are cheaper than competitor
+
+margin_at_avg_price = (avg_competitor_price - our_costs) / avg_competitor_price
+  → answers: "what is our margin if we match the market?"
+```
+
+---
+
+## Testing
+
+```bash
+pytest tests/ -v
+```
+
+| Test file | Tests | Coverage |
+|---|---|---|
+| `test_break_even.py` | 16 | Net profit, margin, organic profit |
+| `test_kpi_engine.py` | 37 | Confidence, CPA/ROAS, decision logic |
+| `test_simulator.py` | 14 | Sampling, reproducibility, probabilities |
+| `test_competitor_scanner.py` | 44 | HTTP mocking, CSV append, positioning |
+| **Total** | **111** | **All passing** |
 
 ---
 
@@ -150,16 +213,22 @@ Run the campaign 1000× with randomized CPA to get probability distributions ins
 ecom-quant-lab/
 ├── src/
 │   ├── __init__.py
-│   ├── break_even.py       # Profitability calculation engine
-│   ├── kpi_engine.py       # Scale/Hold/Kill decision logic
-│   └── simulator.py        # Monte Carlo scenario modeling
+│   ├── break_even.py           # Profitability calculation engine
+│   ├── kpi_engine.py           # Scale/Hold/Kill decision logic
+│   ├── simulator.py            # Monte Carlo scenario modeling
+│   └── competitor_scanner.py  # Competitive price intelligence
 ├── notebooks/
 │   ├── 01_break_even_analyse.ipynb
 │   ├── 02_kpi_decision_engine.ipynb
-│   └── 03_simulator.ipynb
+│   ├── 03_simulator.ipynb
+│   └── 04_competitor_analysis.ipynb
 ├── tests/
-│   ├── test_kpi_engine.py  # 34 tests
-│   └── test_simulator.py   # 17 tests
+│   ├── test_break_even.py         # 16 tests
+│   ├── test_kpi_engine.py         # 37 tests
+│   ├── test_simulator.py          # 14 tests
+│   └── test_competitor_scanner.py # 44 tests
+├── data/
+│   └── competitor_data.csv        # Auto-created, append-only price history
 ├── requirements.txt
 └── README.md
 ```
@@ -173,7 +242,8 @@ ecom-quant-lab/
 - **Pandas** — Data manipulation
 - **Matplotlib / Seaborn** — Visualization
 - **Jupyter** — Interactive notebooks
-- **pytest** — Testing (51 tests, all passing)
+- **requests + BeautifulSoup4** — Web scraping
+- **pytest** — Testing (111 tests, all passing)
 
 ---
 
