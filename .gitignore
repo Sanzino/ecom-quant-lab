@@ -24,6 +24,11 @@ data/*.json
 .DS_Store
 Thumbs.db
 
+# Local config
+.envrc
+.pytest_cache/
+run.py
+
 # Python
 *.py[cod]
 *.egg-info/

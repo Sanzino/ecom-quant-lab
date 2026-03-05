@@ -75,7 +75,7 @@ Jupyter notebooks combining mathematical theory, implementation, and visualizati
 
 **Setup:**
 ```bash
-git clone https://github.com/Sanzino/ecom-quant-lab.git
+git clone https://github.com/ShaffiSanza/ecom-quant-lab.git
 cd ecom-quant-lab
 
 python -m venv venv
@@ -229,8 +229,7 @@ ecom-quant-lab/
 │   └── test_competitor_scanner.py # 44 tests
 ├── data/
 │   └── competitor_data.csv        # Auto-created, append-only price history
-├── requirements.txt
-└── README.md
+└── requirements.txt
 ```
 
 ---
@@ -255,7 +254,7 @@ MIT License
 
 ## Contact
 
-GitHub: [@Sanzino](https://github.com/Sanzino)
+GitHub: [@ShaffiSanza](https://github.com/ShaffiSanza)
 
 ---
 
